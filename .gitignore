@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Streamlit / local app secrets
+.streamlit/secrets.toml
+
+# Local runtime data (optional app caches)
+.cache/
+*.sqlite
+*.sqlite3
+DART OPENAPI/20251231800604.xml
+DART OPENAPI/dart_listed_companies.xlsx
