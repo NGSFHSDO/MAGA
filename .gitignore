@@ -15,6 +15,7 @@ env/
 .env
 .env.*
 !.env.example
+.streamlit/
 
 # Jupyter
 .ipynb_checkpoints/
@@ -37,3 +38,4 @@ htmlcov/
 DART OPENAPI/20251231800604.xml
 DART OPENAPI/dart_listed_companies.xlsx
 DART OPENAPI
+data/
