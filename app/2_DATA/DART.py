@@ -15,6 +15,10 @@ import streamlit as st
 load_dotenv()
 
 
+def get_dart_db_path(end_de: str) -> Path:
+    return Path("data/DART") / f"dart_{end_de}.sqlite"
+
+
 def fetch_dart_disclosure_list(
     end_de: str,
     api_key: str | None = None,
@@ -61,7 +65,7 @@ def save_dart_disclosure_list(
     db_path: Path | None = None,
 ) -> Path:
     """Save fetched DART disclosures into SQLite."""
-    db_path = db_path or Path("data/DART/dart.sqlite")
+    db_path = db_path or get_dart_db_path(end_de)
     init_dart_db(db_path)
 
     columns = [
@@ -261,7 +265,7 @@ def summarize_documents_from_sqlite(
     progress_callback=None,
 ) -> Path:
     """Summarize DART documents from SQLite disclosure rows."""
-    db_path = init_dart_db(db_path)
+    db_path = init_dart_db(db_path or get_dart_db_path(end_de))
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -329,7 +333,7 @@ st.markdown(
     이 페이지는 DART OpenAPI에서 공시 목록을 수집하고, 공시 원문을 로컬 LLM으로 요약해 SQLite DB에 저장하는 과정입니다.
 
     1. 먼저 조회 종료일을 선택한 뒤 `공시 목록 저장`을 실행합니다. 선택한 날짜까지의 DART 공시 목록을 수집하고
-       `data/DART/dart.sqlite`의 `dart_disclosures` 테이블에 저장합니다.
+       `data/DART/dart_YYYYMMDD.sqlite`의 `dart_disclosures` 테이블에 저장합니다.
     2. 다음으로 `원문 요약 저장`을 실행합니다. DB에서 선택한 날짜의 공시 중 `stock_code`와 `rcept_no`가 있는
        행만 골라 각 접수번호의 원문 문서를 DART 원문 API에서 가져옵니다.
     3. DART 원문 문서는 zip 파일 형태로 내려오며, 내부 XML 파일의 `BODY` 영역을 파싱해 텍스트만 추출합니다.
@@ -368,6 +372,7 @@ if st.button("공시 목록 저장"):
 
 if st.button("원문 요약 저장"):
     end_de = format_date(selected_date)
+    db_path = get_dart_db_path(end_de)
 
     try:
         progress = st.progress(0)
@@ -390,6 +395,7 @@ if st.button("원문 요약 저장"):
             db_path = summarize_documents_from_sqlite(
                 end_de=end_de,
                 api_key=api_key,
+                db_path=db_path,
                 progress_callback=update_summary_progress,
             )
         progress.progress(1.0)
