@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -6,9 +7,14 @@ import time
 from urllib.parse import parse_qs, urljoin, urlparse
 
 from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+from openai import OpenAI
+import opendataloader_pdf
 import requests
 import streamlit as st
 
+
+load_dotenv()
 
 BASE_URL = "https://finance.naver.com"
 LIST_URL = "https://finance.naver.com/research/company_list.naver"
@@ -48,6 +54,8 @@ def init_nfr_db(db_path: Path) -> Path:
                 body_text TEXT,
                 pdf_url TEXT,
                 pdf_path TEXT,
+                md_path TEXT,
+                llm_summary TEXT,
                 detail_url TEXT,
                 collected_at TEXT
             )
@@ -66,12 +74,24 @@ def init_nfr_db(db_path: Path) -> Path:
                 body_text TEXT,
                 pdf_url TEXT,
                 pdf_path TEXT,
+                md_path TEXT,
+                llm_summary TEXT,
                 detail_url TEXT,
                 collected_at TEXT
             )
             """
         )
+        ensure_column(conn, "nfr_company_reports", "md_path", "TEXT")
+        ensure_column(conn, "nfr_company_reports", "llm_summary", "TEXT")
+        ensure_column(conn, "nfr_industry_reports", "md_path", "TEXT")
+        ensure_column(conn, "nfr_industry_reports", "llm_summary", "TEXT")
     return db_path
+
+
+def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, column_type: str) -> None:
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
 
 
 def format_naver_date(selected_date: date) -> str:
@@ -230,6 +250,65 @@ def clean_filename(text: str | None) -> str:
     return text or "unknown"
 
 
+def clean_storage_text(text: str) -> str:
+    return "".join(char for char in text if char in "\t\n\r" or ord(char) >= 32)
+
+
+@st.cache_resource(show_spinner=False)
+def get_openai_client() -> OpenAI:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(".env 파일에 OPENAI_API_KEY가 설정되어 있지 않습니다.")
+    return OpenAI(api_key=api_key)
+
+
+def convert_pdf_to_markdown(pdf_path: Path) -> Path:
+    pdf_path = Path(pdf_path)
+    output_dir = pdf_path.parent
+    md_path = pdf_path.with_suffix(".md")
+
+    opendataloader_pdf.convert(
+        input_path=[str(pdf_path)],
+        output_dir=str(output_dir),
+        format="markdown",
+        image_output="off",
+        quiet=True,
+    )
+
+    if md_path.exists():
+        return md_path
+
+    markdown_files = sorted(
+        output_dir.glob(f"{pdf_path.stem}*.md"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    if markdown_files:
+        return markdown_files[0]
+
+    raise FileNotFoundError(f"Markdown 변환 파일을 찾지 못했습니다: {md_path}")
+
+
+def summarize_report_markdown(md_path: Path, report_type: str) -> str:
+    doc_text = Path(md_path).read_text(encoding="utf-8")
+    input_text = f"""
+다음은 증권사 {report_type} 리포트 원문이다.
+불필요한 문구(인사말, 반복 문장, 일반적 주의문구)는 제거하고,
+핵심 투자정보만 남기고 짧게 요약하라.
+
+[리포트 원문]
+{doc_text}
+"""
+
+    client = get_openai_client()
+    response = client.responses.create(
+        model="gpt-5-nano",
+        input=input_text,
+        max_output_tokens=8192,
+    )
+    return clean_storage_text(response.output_text).strip()
+
+
 def extract_report_detail(
     report: dict[str, str],
     target_date: str,
@@ -300,6 +379,8 @@ def extract_report_detail(
 
     pdf_url = pdf_urls[0] if pdf_urls else None
     pdf_path = None
+    md_path = None
+    llm_summary = None
 
     if download_pdf and pdf_url:
         save_dir = PDF_BASE_DIR / target_date
@@ -317,6 +398,8 @@ def extract_report_detail(
         )
         pdf_response.raise_for_status()
         pdf_path.write_bytes(pdf_response.content)
+        md_path = convert_pdf_to_markdown(pdf_path)
+        llm_summary = summarize_report_markdown(md_path, "종목분석")
 
     return {
         "nid": report["nid"],
@@ -331,6 +414,8 @@ def extract_report_detail(
         "body_text": body_text,
         "pdf_url": pdf_url,
         "pdf_path": str(pdf_path) if pdf_path is not None else None,
+        "md_path": str(md_path) if md_path is not None else None,
+        "llm_summary": llm_summary,
         "detail_url": detail_url,
         "collected_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -400,6 +485,8 @@ def extract_industry_report_detail(
 
     pdf_url = pdf_urls[0] if pdf_urls else None
     pdf_path = None
+    md_path = None
+    llm_summary = None
 
     if download_pdf and pdf_url:
         save_dir = INDUSTRY_PDF_BASE_DIR / target_date
@@ -417,6 +504,8 @@ def extract_industry_report_detail(
         )
         pdf_response.raise_for_status()
         pdf_path.write_bytes(pdf_response.content)
+        md_path = convert_pdf_to_markdown(pdf_path)
+        llm_summary = summarize_report_markdown(md_path, "산업분석")
 
     return {
         "nid": report["nid"],
@@ -429,6 +518,8 @@ def extract_industry_report_detail(
         "body_text": body_text,
         "pdf_url": pdf_url,
         "pdf_path": str(pdf_path) if pdf_path is not None else None,
+        "md_path": str(md_path) if md_path is not None else None,
+        "llm_summary": llm_summary,
         "detail_url": detail_url,
         "collected_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -443,9 +534,9 @@ def save_report_to_sqlite(report_data: dict[str, object], db_path: Path) -> None
             INSERT INTO nfr_company_reports (
                 nid, target_date, company_name, report_title, broker, report_date,
                 views, target_price, investment_opinion, body_text, pdf_url,
-                pdf_path, detail_url, collected_at
+                pdf_path, md_path, llm_summary, detail_url, collected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(nid) DO UPDATE SET
                 target_date = excluded.target_date,
                 company_name = excluded.company_name,
@@ -458,6 +549,8 @@ def save_report_to_sqlite(report_data: dict[str, object], db_path: Path) -> None
                 body_text = excluded.body_text,
                 pdf_url = excluded.pdf_url,
                 pdf_path = excluded.pdf_path,
+                md_path = excluded.md_path,
+                llm_summary = excluded.llm_summary,
                 detail_url = excluded.detail_url,
                 collected_at = excluded.collected_at
             """,
@@ -474,6 +567,8 @@ def save_report_to_sqlite(report_data: dict[str, object], db_path: Path) -> None
                 report_data["body_text"],
                 report_data["pdf_url"],
                 report_data["pdf_path"],
+                report_data["md_path"],
+                report_data["llm_summary"],
                 report_data["detail_url"],
                 report_data["collected_at"],
             ),
@@ -489,9 +584,9 @@ def save_industry_report_to_sqlite(report_data: dict[str, object], db_path: Path
             INSERT INTO nfr_industry_reports (
                 nid, target_date, industry_name, report_title, broker,
                 report_date, views, body_text, pdf_url, pdf_path,
-                detail_url, collected_at
+                md_path, llm_summary, detail_url, collected_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(nid) DO UPDATE SET
                 target_date = excluded.target_date,
                 industry_name = excluded.industry_name,
@@ -502,6 +597,8 @@ def save_industry_report_to_sqlite(report_data: dict[str, object], db_path: Path
                 body_text = excluded.body_text,
                 pdf_url = excluded.pdf_url,
                 pdf_path = excluded.pdf_path,
+                md_path = excluded.md_path,
+                llm_summary = excluded.llm_summary,
                 detail_url = excluded.detail_url,
                 collected_at = excluded.collected_at
             """,
@@ -516,6 +613,8 @@ def save_industry_report_to_sqlite(report_data: dict[str, object], db_path: Path
                 report_data["body_text"],
                 report_data["pdf_url"],
                 report_data["pdf_path"],
+                report_data["md_path"],
+                report_data["llm_summary"],
                 report_data["detail_url"],
                 report_data["collected_at"],
             ),
@@ -600,8 +699,8 @@ st.markdown(
     2. 마지막 페이지까지 순회하면서 모든 상세 리포트 URL을 수집합니다.
     3. 종목분석은 종목명, 리포트 제목, 증권사, 작성일, 조회수, 목표가, 투자의견, 본문 텍스트, PDF URL을 추출합니다.
     4. 산업분석은 업종명, 리포트 제목, 증권사, 작성일, 조회수, 본문 텍스트, PDF URL을 추출합니다.
-    5. PDF 다운로드를 켜면 `data/NFR/company_reports/YYYY-MM-DD` 또는 `data/NFR/industry_reports/YYYY-MM-DD` 아래에 PDF 파일도 저장합니다.
-    6. 추출 정보는 `data/NFR/nfr_YYYYMMDD.sqlite`의 `nfr_company_reports`, `nfr_industry_reports` 테이블에 저장합니다.
+    5. PDF 다운로드를 켜면 PDF를 저장하고 같은 폴더에 Markdown으로 변환한 뒤 `gpt-5-nano`로 핵심 투자정보를 요약합니다.
+    6. 추출 정보와 `md_path`, `llm_summary`는 `data/NFR/nfr_YYYYMMDD.sqlite`의 `nfr_company_reports`, `nfr_industry_reports` 테이블에 저장합니다.
     """
 )
 
@@ -611,7 +710,7 @@ selected_date = st.date_input(
     max_value=date.today(),
 )
 
-download_pdf = st.checkbox("PDF 파일도 저장", value=True)
+download_pdf = st.checkbox("PDF/Markdown 저장 및 LLM 요약", value=True)
 
 if st.button("종목분석 리포트 수집"):
     target_date = format_naver_date(selected_date)

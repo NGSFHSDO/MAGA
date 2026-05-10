@@ -7,6 +7,7 @@ import zipfile
 
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
+from openai import OpenAI
 import pandas as pd
 import requests
 import streamlit as st
@@ -219,16 +220,14 @@ def clean_storage_text(text: str) -> str:
 
 
 @st.cache_resource(show_spinner=False)
-def load_summary_model():
-    from mlx_lm import load
+def get_openai_client() -> OpenAI:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError(".env 파일에 OPENAI_API_KEY가 설정되어 있지 않습니다.")
+    return OpenAI(api_key=api_key)
 
-    model_name = "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit"
-    return load(model_name)
 
-
-def summarize_disclosure_text(body_text: str, model, tokenizer) -> str:
-    from mlx_lm import generate
-
+def summarize_disclosure_text(body_text: str) -> str:
     input_text = f"""
 다음은 공시 원문이다.
 불필요한 문구(인사말, 반복 문장, 일반적 주의문구)는 제거하고,
@@ -238,24 +237,13 @@ def summarize_disclosure_text(body_text: str, model, tokenizer) -> str:
 {body_text}
 """
 
-    messages = [
-        {"role": "user", "content": input_text},
-    ]
-
-    prompt = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=True,
+    client = get_openai_client()
+    response = client.responses.create(
+        model="gpt-5-nano",
+        input=input_text,
+        max_output_tokens=8192,
     )
-
-    response = generate(
-        model,
-        tokenizer,
-        prompt=prompt,
-        max_tokens=16384,
-        verbose=False,
-    )
-    return clean_storage_text(response).strip()
+    return clean_storage_text(response.output_text).strip()
 
 
 def summarize_documents_from_sqlite(
@@ -281,7 +269,6 @@ def summarize_documents_from_sqlite(
             (end_de,),
         ).fetchall()
 
-    model, tokenizer = load_summary_model()
     total_count = len(target_rows)
     success_count = 0
     failed_count = 0
@@ -299,7 +286,7 @@ def summarize_documents_from_sqlite(
                     api_key=api_key,
                 )
                 body_text = clean_storage_text(body_text)
-                summary = summarize_disclosure_text(body_text, model, tokenizer)
+                summary = summarize_disclosure_text(body_text)
 
                 conn.execute(
                     """
@@ -330,14 +317,14 @@ st.title("DART 전자공시")
 
 st.markdown(
     """
-    이 페이지는 DART OpenAPI에서 공시 목록을 수집하고, 공시 원문을 로컬 LLM으로 요약해 SQLite DB에 저장하는 과정입니다.
+    이 페이지는 DART OpenAPI에서 공시 목록을 수집하고, 공시 원문을 OpenAI 모델로 요약해 SQLite DB에 저장하는 과정입니다.
 
     1. 먼저 조회 종료일을 선택한 뒤 `공시 목록 저장`을 실행합니다. 선택한 날짜까지의 DART 공시 목록을 수집하고
        `data/DART/dart_YYYYMMDD.sqlite`의 `dart_disclosures` 테이블에 저장합니다.
     2. 다음으로 `원문 요약 저장`을 실행합니다. DB에서 선택한 날짜의 공시 중 `stock_code`와 `rcept_no`가 있는
        행만 골라 각 접수번호의 원문 문서를 DART 원문 API에서 가져옵니다.
     3. DART 원문 문서는 zip 파일 형태로 내려오며, 내부 XML 파일의 `BODY` 영역을 파싱해 텍스트만 추출합니다.
-    4. 추출한 원문은 로컬 MLX 모델 `Qwen3-30B-A3B-Instruct-2507-4bit`에 전달해 핵심 투자정보만 짧게 요약합니다.
+    4. 추출한 원문은 OpenAI `gpt-5-nano` 모델에 전달해 핵심 투자정보만 짧게 요약합니다.
     5. 요약 결과는 `dart_summaries` 테이블의 `llm_summary` 컬럼에 저장합니다. 목록과 요약을 함께 보고 싶을 때는
        `dart_summary_view`를 조회하면 됩니다.
 

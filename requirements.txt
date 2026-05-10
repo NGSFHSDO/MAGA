@@ -28,6 +28,8 @@ matplotlib-inline==0.2.1
 narwhals==2.18.0
 nest-asyncio==1.6.0
 numpy==2.4.3
+openai==2.33.0
+opendataloader-pdf==2.4.3
 packaging==26.0
 pandas==2.3.3
 parso==0.8.6
